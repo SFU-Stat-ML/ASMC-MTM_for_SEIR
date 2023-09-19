@@ -1,0 +1,247 @@
+---
+title: "SIR_AMCMC with empirical cov"
+author: "Niwanthi Muthukudaarachchi"
+date: "2023-08-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+getwd()
+setwd("C:\\SFU\\Spring 2023\\STAT 853 - Applications of Statistical Computing\\Project")
+set.seed(444)
+# Solving I(t) DE trajectory using ODE solver
+library(deSolve)
+library(mvtnorm)
+library(MASS)
+library(coda)
+library(tictoc)
+
+
+# initial (state) values for SIR model
+N <- 1000
+x0 <- c(S = N-6, I = 6, R = 0)
+
+# vector of time steps
+times <- 0:80
+
+# vector of parameters used in SIR model
+params <- c(beta = 0.3, gamma = 0.1)
+
+SIR <- function(t, x, params) {
+  with(as.list(c(params, x)), {
+    dS <- -beta * S * I / N 
+    dI <- beta * S * I / N - gamma * I
+    dR <- gamma * I 
+    list(c(dS, dI, dR))
+  })
+}
+
+r <-  rk4(x0, times, SIR, params)
+plot(r)
+
+I_values <- r[, "I"]
+
+(I_max <- max(I_values))
+
+y <- rnbinom(81,I_values,0.54)
+plot(times,y, main = 'Observations', xlab = 'time')
+
+(y_max <- max(y))
+
+# MCMC approach
+library(MCMCpack)
+library(truncnorm)
+
+# Define the target distribution as a function of all unknown parameters
+target_distribution <- function(params) {
+  beta <- params[1] # transmission rate
+  gamma <- params[2] # recovery rate
+  phi <- params[3] # dispersion parameter of the negative binomial model
+  S0 <- params[4] # initial number of susceptible individuals
+  I0 <- params[5] # initial number of infected individuals
+  R0 <- params[6] # initial number of recovered individuals
+  
+  params2 <- c(beta, gamma)
+  
+  SIR_model <- function(t, x, params2) {
+    with(as.list(c(params2, x)), {
+      dS <- -beta * S * I / N 
+      dI <- beta * S * I / N - gamma * I
+      dR <- gamma * I 
+      list(c(dS, dI, dR))
+    })
+  }
+  
+  x_0 <- c(S = S0, I = I0, R = R0)
+  out <-  rk4(x_0, times, SIR_model, params2)
+  
+  I_values <- out[, "I"]
+  
+  # Calculate the log-likelihood
+  loglikelihood <- sum(log(dnbinom(y, I_values, phi)))
+  
+  # Calculate the prior distributions for each parameter
+  log_prior_beta <- dunif(beta, min = 0, max = 1, log=TRUE)
+  log_prior_gamma <- dunif(gamma, min = 0, max = 1, log=TRUE)
+  log_prior_phi <- dunif(phi, min = 0, max = 1, log=TRUE)
+  log_prior_S0 <- dnorm(S0, 994, 1, log = TRUE)
+  log_prior_I0 <- dnorm(I0, 5, 1, log = TRUE)
+  log_prior_R0 <- dnorm(R0, 0, 0.5, log = TRUE)
+  
+  # Return the product of the mixture and prior distributions
+  
+  return(loglikelihood + log_prior_beta + log_prior_gamma + log_prior_phi  + log_prior_S0  + log_prior_I0 + log_prior_R0)
+}
+
+# Initialize starting point
+current_params1 <- c(0.3, 0.1, 0.5, 994, 6, 0)
+
+# Define the number of iterations
+n_iter1 <- 20000
+
+# Initialize empty matrix to store samples
+samples <- matrix(nrow = n_iter1, ncol = 6)
+
+tic()
+# Run the Metropolis-Hastings algorithm
+for (i in 1:n_iter1) {
+  # Propose a new value
+  proposed_params1 <- c(rnorm(1,current_params1[1],0.01), rnorm(1,current_params1[2],0.01), rnorm(1, current_params1[3], 0.01), rtruncnorm(1, 0, 1000, current_params1[4], 1), rtruncnorm(1, 0, 1000, current_params1[5], 1), rtruncnorm(1, 0,1000 , current_params1[6], 0.1))
+  
+  # Calculate acceptance probability
+  
+  m1 <- target_distribution(proposed_params1)
+  m2 <- target_distribution(current_params1)
+  (r1 <- exp(m1-m2))
+  
+  acceptance_prob1 <- min(1, r1)
+  
+  # Decide whether to accept or reject the proposal
+  if (!is.na(acceptance_prob1) && runif(1) < acceptance_prob1) {
+    current_params1 <- proposed_params1
+  }
+  
+  # Store the current parameters
+  samples[i, ] <- current_params1
+} 
+toc()
+r1
+(sigma1 <- cov(samples))
+(ess_val1 <- effectiveSize(samples))
+```
+
+```{r}
+# Adaptive MCMC
+current_params <- samples[n_iter1,]
+
+n_iter2 <- 20000
+
+# Initialize empty matrix to store samples
+samples_matrix <- matrix(nrow = n_iter2, ncol = 6)
+
+# Initialize empty vector to store log posterior values
+log_posterior_values <- numeric(n_iter2)
+
+n_iter <- n_iter1 + n_iter2
+b <- 0.988
+
+tic()
+# Run the Adaptive MCMC - Metropolis-Hastings algorithm
+for (i in 1:n_iter2) {
+  # Propose a new value
+  proposed_params <- b * rmvnorm(1, current_params,(2.38^2) * sigma1 / 6, checkSymmetry = FALSE) + (1 - b) * rmvnorm(1, current_params, (0.1^2) * diag(6) / 6, checkSymmetry = FALSE)
+  
+  # Calculate acceptance probability
+  
+  m3 <- target_distribution(proposed_params)
+  m4 <- target_distribution(current_params)
+  (r <- exp(m3-m4))
+  
+  acceptance_prob <- min(1, r)
+  
+  # Decide whether to accept or reject the proposal
+  if (!is.na(acceptance_prob) && runif(1) < acceptance_prob) {
+    current_params <- proposed_params
+  }
+  # Calculate the log posterior value for the current parameters
+  log_posterior <- target_distribution(current_params)
+  
+  # Store the current parameters
+  samples_matrix[i, ] <- current_params
+  
+  # Store the log posterior value
+  log_posterior_values[i] <- log_posterior
+}
+toc()
+
+r
+(ess_val2 <- effectiveSize(samples_matrix))
+
+samples_matrix1 <- rbind(as.data.frame(samples), as.data.frame(samples_matrix))
+
+samples_beta <- data.frame(Iterations = 1: n_iter, transmission_rate = samples_matrix1[,1])
+samples_gamma <- data.frame(Iterations = 1: n_iter, recovery_rate = samples_matrix1[,2])
+samples_phi <- data.frame(Iterations = 1: n_iter, disp_para = samples_matrix1[,3])
+samples_S0 <- data.frame(Iterations = 1 : n_iter, init_S = samples_matrix1[,4])
+samples_I0 <- data.frame(Iterations = 1 : n_iter, init_I = samples_matrix1[,5])
+samples_R0 <- data.frame(Iterations = 1 : n_iter, init_R = samples_matrix1[,6])
+
+# trace plots of the parameters (Adaptive MCMC) 
+par(mfrow = c(2, 2)) 
+plot(samples_beta, type = 'l', main = 'Trace plot of beta', col = 'darkblue')
+
+plot(samples_gamma, type = 'l', main = 'Trace plot of gamma', col = 'darkblue')
+
+plot(samples_phi, type = 'l', main = 'Trace plot of phi', col = 'darkblue')
+
+plot(samples_S0, type = 'l', main = 'Trace plot of S0', col = 'darkblue')
+
+plot(samples_I0, type = 'l', main = 'Trace plot of I0', col = 'darkblue')
+
+plot(samples_R0, type = 'l', main = 'Trace plot of R0', col = 'darkblue')
+
+# Histograms of the parameters (Adaptive MCMC)
+par(mfrow = c(3, 2)) 
+
+hist(samples_matrix1[,1], freq = FALSE, main = 'Histogram of beta', xlab = 'beta', col = 'lightblue')
+
+hist(samples_matrix1[,2], freq = FALSE, main = 'Histogram of gamma', xlab = 'gamma', col = 'lightblue')
+
+hist(samples_matrix1[,3], freq = FALSE, main = 'Histogram of phi', xlab = 'phi', col = 'lightblue')
+
+hist(samples_matrix1[,4], freq = FALSE, main = 'Histogram of S0', xlab = 'S0', col = 'lightblue')
+
+hist(samples_matrix1[,5], freq = FALSE, main = 'Histogram of I0', xlab = 'I0', col = 'lightblue')
+
+hist(samples_matrix1[,6], freq = FALSE, main = 'Histogram of R0', xlab = 'R0', col = 'lightblue')
+
+# calculation of transmission rate (beta)
+(beta_approx <- mean(samples_beta$transmission_rate))
+
+# calculation of recovery rate (gamma)
+(gamma_approx <- mean(samples_gamma$recovery_rate))
+
+# calculation of basic reproduction number
+(R <- beta_approx/gamma_approx)
+
+# calculation of dispersion parameter (phi)
+(phi_approx <- mean(samples_phi$disp_para))
+
+# calculation of initial # of susceptible individuals (S_0)
+(S0_approx <- mean(samples_S0$init_S))
+
+# calculation of initial # of infected individuals (I_0)
+(I0_approx <- mean(samples_I0$init_I))
+
+# calculation of initial # of recovered individuals (R_0)
+(R0_approx <- mean(samples_R0$init_R))
+
+# Estimate the marginal likelihood using the log posterior values
+log_marginal_likelihood <- log(mean(exp(log_posterior_values)))
+(marginal_likelihood <- exp(log_marginal_likelihood))
+```
+
