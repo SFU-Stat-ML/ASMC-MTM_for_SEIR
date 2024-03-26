@@ -1,0 +1,522 @@
+# bisection function
+
+# - recursive implementation of bisection algorithm
+bisection <- function(low, high, W, u, eta){
+  mid <- (low + high)/2
+  f.low <- rCESS(W, u, low, eta)
+  f.mid <- rCESS(W, u, mid, eta)
+  f.high <- rCESS(W, u, high, eta)
+  
+  #cat("flow:" ,rCESS(W, u, 0, tuning_param$eta), "\n")
+  #cat("fhigh:" ,rCESS(W, u, 1, tuning_param$eta), "\n")
+  if(f.low * f.high > 0)
+    stop('Invalid endpoint for bisection.')
+  
+  try({if( low >= high )
+    stop('bisection overlap')
+    
+    if((abs(f.mid) < 1e-10)||((high - low)/2<1e-10))
+      return(mid)
+    if((f.low * f.mid) < 0)
+      return(bisection(low, mid, W, u, eta))
+    if((f.high * f.mid) < 0)
+      return(bisection(mid, high, W, u, eta))
+  })
+  
+  stop('bisection flawed')
+}
+
+# log-sum-exponential evaluation of log(sum(w)) (Avoids numerical underflow and overflow)
+logsum <- function(logw){
+  logmax = max(logw)
+  log(sum(exp(logw-logmax))) + logmax
+}
+
+# relative conditional effective sample size
+# W - vector of weights
+# u - vector of same length as W, represents some adjustment or transformation to the weights
+# a - scalar value used to scale the transformation u
+# phi - user specified threshold (eta)
+rCESS <- function(W, u, a, eta) {
+  logw <- a * u          # weight update
+  exp(2*logsum(log(W)+logw) - logsum(log(W)+2*logw)) - eta
+}
+
+# effective sample size (Conditional effective sample size)
+rESS <- function(logW){
+  K <- length(logW) # number of particles
+  logWmax <- max(logW)
+  logRESS <- -(2*logWmax + log(sum(exp(2*logW-2*logWmax)))) - log(K)
+  return(exp(logRESS))
+} # Higher ESS are better
+
+# systematic re-sampling algorithm # Commonly used in particle filters and other Monte Carlo methods
+# It is designed to select a new set of particles from the current set based on their weights.
+systematic_resample <- function(W){
+  K <- length(W)
+  U <- runif(1,0,1/K) + 0:(K-1)/K # these evenly spaced points determine which weights are selected
+  W.sum <- cumsum(W)
+  N1 <- rep(NA,K)
+  j <- 1
+  
+  # re-sampling loop
+  for( i in 1:K )
+  {
+    found = F
+    while( !found )
+    {
+      if( U[i]>W.sum[j] )
+        j <- j+1
+      else
+        found = T
+    }
+    N1[i] <- j # (jth particle is selected as the ith re-sampled particle)
+  }
+  return( N1 ) # N1 is an array containing indices of the re-sampled particles.
+}
+
+# ASMC function ----------------------------------------------------------------
+
+#' Annealed Sequential Monte Carlo
+#'
+#' Implementation of the annealed sequential Monte Carlo algorithm with adaptively determined annealing scheme
+#' @param K Number of particles
+#' @param theta_cov Either a proposal covariance matrix or a string "adaptive" to use an adaptive proposal scheme
+#' @param tuning_param List of tuning parameters for the ASMC algorithm: 1) eps - re-sampling threshold,
+#'  2) eta - target rCESS for adaptive re-sampling scheme, 3) alpha - annealing scheme. Only supply one of eta or alpha, not both.
+#' @param init Initialization function for the parameters
+#' @param data Matrix of data used in the likelihood
+#' @param likelihood Function to evaluate log-likelihood. Takes data and parameters as arguments.
+#' @param prior Function to evaluate the log-prior. Takes parameters as arguments.
+#' @param reference Function to evaluate the log-reference distribution. Takes parameters as arguments.
+#' @returns List of particles, weights, marginal log-likelihood, and effective sample size
+#' @export
+#' @examples
+#' 
+asmc <- function(K, theta_cov, tuning_param, init, data, likelihood, prior, reference){
+  
+  # initialize storage list
+  alpha <- list() # a list for tempering parameters
+  ESS <- list()   # a list for ESS
+  logZ <- list()  # list for log-normalizing constant
+  particles <- list()
+  W <- list()
+  
+  # check if adaptive annealing scheme is being used
+  adaptive_alpha <- "eta" %in% names(tuning_param) # check whether eta is in the list of tuning_param.
+  # adaptive_alpha has a logical value, "True" if eta is in tuning_param list, else "False".
+  
+  # initialize values
+  # initialize the iterations
+  r <- 1                  # SMC iteration # SMC process starts with the first iteration.
+  #initialize the log-normalizing constant
+  logZ[[r]] <- 0 # log-normalizing constant for the 1st iteration is set to 0.
+  
+  # initialize the annealing parameter 
+  if(adaptive_alpha){
+    alpha[[r]] <- 0    # tempering parameters
+    alphaDiff <- 0     # difference b/w two successive tempering parameters
+  } else{
+    alpha <- as.list(tuning_param$alpha)
+  }
+  
+  # initialize particles
+  # Create a list with two elements for each particle (k). First element is initial values of theta and
+  # second element is a logical value set to False). init() is a user defined function.
+  particles[[r]] <- lapply(1:K, function(k) list(theta = init(), accept = F))
+  
+  # initialize the weighted covariance matrix
+  weighted_cov <- diag(5)
+  ## Initialize weights
+  # normalized weights
+  # Since all particles are initially equally likely (as they are sampled from the same 
+  # reference distribution), each weight is set to 1/K
+  W[[r]] <- rep(1/K,K)
+  logW <- log(W[[r]])
+  
+  # un-normalized weights
+  w <- rep(1,K) # initially all the un-normalized weights are set to 1.
+  logw <- rep(0,K)
+  
+  # begin iterative process
+  while( alpha[[r]]<1 )   # repeat this step if the tempering parameter is less than 1
+  {
+    cat("iteration:",r,"\n") # prints the current iteration number
+    r <- r+1  # increment iteration
+    # evaluate the log-likelihood for updating alpha
+    u <- rep(0, K)   # incremental log-importance weights
+    
+    # evaluate the log-likelihood for each particle using current data and previous theta.
+    u <- sapply(1:K, function(k){
+      logL <- likelihood(data, particles[[r-1]][[k]]$theta)
+      return(logL)
+    })
+    
+    if(adaptive_alpha){
+      # if adaptive_alpha is True, alpha is updated using the bisection function based on the target "phi"
+      # in tuning_param list
+      alphaDiff <- bisection( 0, 1,  W[[r-1]], u, tuning_param$eta)
+      alpha[[r]] <- alpha[[r-1]] + alphaDiff
+    } else{
+      alphaDiff <- alpha[[r]] - alpha[[r-1]]
+    }
+    
+    #cat("flow:" ,rCESS(W[[r-1]], u, 0, tuning_param$eta), "\n")
+    #cat("fhigh:" ,rCESS(W[[r-1]], u, 1, tuning_param$eta), "\n")
+    #cat("Bisection:", bisection(0,1,W[[r-1]],u, tuning_param$eta), "\n")
+    #cat("loglikelihood:", u[r], "\n")
+    #cat("previous alpha:",alpha[[r-1]], "\n")
+    cat("annealing parameter:",alpha[[r]],"\n") # prints the current alpha value for the ongoing iteration.
+    #cat("Difference of alpha:", alpha[[r]] - alpha[[r-1]], "\n")
+    
+    # if alpha is set greater than 1, fix by setting to 1
+    if( alpha[[r]]>1 ){
+      alpha[[r]] <- 1
+      alphaDiff <- 1-alpha[[r-1]] # alphaDiff is recalculated
+    }
+    
+    # Where I should attempt MTM.
+    # This function is applied to each particle and uses corresponding cov matrix for the proposal 
+    # distribution
+    # Updated MCMCmove Function
+    MCMCmove <- function(particle, theta_cov){
+      # Adaptive Metropolis-Hastings
+      MH <- function(theta_old, data, likelihood, prior, alpha){
+        theta_proposals <- matrix(NA, nrow = J, ncol = length(theta_old))
+        
+        for (j in 1:J) {
+          if(r <= 2 * d){
+            theta_cov <- 0.1^2 * diag(d)/d
+            theta_proposals[j, ] <- rmvnorm(1, theta_old, theta_cov)
+          }
+          else{
+            if(runif(1) < b){
+              theta_cov <- 2.38^2 * weighted_cov / d
+              theta_proposals[j, ] <- rmvnorm(1, theta_old, theta_cov)
+            }
+            else{
+              theta_cov <- 0.1^2 * diag(d) / d
+              theta_proposals[j, ] <- rmvnorm(1, theta_old, theta_cov)
+            }
+          }
+        }
+        
+        # Compute likelihoods and priors for all proposals
+        likelihoods <- alpha* apply(theta_proposals, 1, likelihood, data = data)
+        priors <- apply(theta_proposals, 1, prior)
+        
+        # Compute weights (unnormalized probabilities) for all proposals
+        logwyx <- likelihoods + priors
+        
+        # Normalize weights to get probabilities
+        probabilities <- exp(logwyx - log(sum(exp(logwyx))))
+        
+        #cat("prob", probabilities, "\n")
+        # Step 2: Select Y from the proposals based on the computed probabilities
+        index <- sample(1:J, size = 1, prob = probabilities)
+        theta_new <- theta_proposals[index, ]
+        
+        # Generate k-1 new proposals from T(theta_new, .) and compute weights for the new set
+        new_proposals <- matrix(NA, nrow = J - 1, ncol = length(theta_old))
+        for (j in 1:(J - 1)) {
+          if(r <= 2 * d){
+            theta_cov <- 0.1^2 * diag(d)/d
+            new_proposals[j, ] <- rmvnorm(1, theta_new, theta_cov)
+          }
+          else{
+            if(runif(1) < b){
+              theta_cov <- 2.38^2 * weighted_cov / d
+              new_proposals[j, ] <- rmvnorm(1, theta_new, theta_cov)
+            }
+            else{
+              theta_cov <- 0.1^2 * diag(d)/d
+              new_proposals[j, ] <- rmvnorm(1, theta_new, theta_cov)
+            }
+          }
+        }
+        
+        # Include theta_old in the new set and compute weights
+        new_likelihoods <- c(alpha * apply(new_proposals, 1, likelihood, data = data), likelihood(data, theta_old))
+        new_priors <- c(apply(new_proposals, 1, prior), prior(theta_old))
+        logwxy <- c(new_likelihoods + new_priors, likelihood(data, theta_old) + prior(theta_old))
+        
+        # Step 3: Accept or reject Y based on the acceptance ratio
+        ratio <- min(1, sum(exp(logwyx))/ sum(exp(logwxy)))
+        
+        # accept/reject step
+        if (!is.na(ratio) && runif(1) < ratio){
+          return(list(theta = theta_new, accept = T))
+        } else{
+          return(list(theta = theta_old, accept = F))
+        }
+      }
+      # Calls the MH function
+      MH(particle$theta, data, likelihood, prior, alpha[[r]])
+    }   
+    
+    particles[[r]] <- lapply(particles[[r-1]],  MCMCmove, theta_cov)
+    
+    ## Converting the particles[[r]] list to a matrix with K rows and d columns
+    theta_values_r_1 <- lapply(particles[[r - 1]], function(particle) particle$theta)
+    theta_matrix_r_1 <- do.call(rbind, theta_values_r_1)
+    
+    # compute the ESS
+    log_incremental_w <- alphaDiff * u
+    logw <- log_incremental_w + logw  # log un-normalized weights are updated by adding incremental
+    # weight to the previous log un-normalized weight
+    logmax <- max(logw) # find the maximum of the updated log un-normalized weights
+    logZ[[r]] <- logZ[[r-1]] + logsum(log_incremental_w + logW)  # update the log normalizing constant 
+    W[[r]] <- exp(logw-logmax)/sum(exp(logw-logmax))   # normalized weights
+    logW <- log(W[[r]]) # log normalized weights
+    
+    ESS[[r]] <- rESS(logW) # Calculate the ESS 
+    
+    # re-sample if ESS below threshold
+    if( ESS[[r]]<tuning_param$eps )
+    {
+      cat("Resample: ESS=", ESS[[r]], '\n')
+      ancestors <- systematic_resample( W[[r]] )
+      particles[[r]] <-  particles[[r]][ancestors] #particles are then updated by selecting the particles 
+      # corresponding to the ancestors indices. This step effectively replaces particles with low weights 
+      # with duplicates of particles with higher weights
+      W[[r]] <- rep(1/K,K) # resets the normalized weights
+      logW <- log(W[[r]]) # re-calculate the logarithm of the normalized weights
+      w <- rep(1,K) # un-normalized weights are reset to 1
+      logw <- rep(0,K) # logarithm of un-normalized weights
+    }
+    
+    # Calculate the weighted covariance matrix
+    cov_weighted_l <- cov.wt(theta_matrix_r_1, W[[r - 1]])
+    weighted_cov <- cov_weighted_l[[1]]
+  }
+  
+  # these particles are the primary output of the algorithm. They represent the distribution of interest.
+  # logZ is used to calculate the marginal likelihood
+  output <- list(particles = particles,
+                 alpha = alpha,
+                 ESS = ESS,
+                 logZ = logZ,
+                 W = W)
+  return(output)
+}
+
+set.seed(444)
+
+# Solving I(t) DE trajectory using ODE solver
+library(deSolve)
+library(mvtnorm)
+library(MASS)
+library(coda)
+library(MCMCpack)
+library(truncnorm)
+
+# initial (state) values for SIR model
+N <- 1000
+x0 <- c(S = N-6, I = 6, R = 0)
+
+# vector of time steps
+times <- 0:59
+
+# vector of parameters used in SIR model
+params <- c(beta = 0.3, gamma = 0.15)
+
+SIR <- function(t, x, params) {
+  with(as.list(c(params, x)), {
+    dS <- -beta * S * I / N 
+    dI <- beta * S * I / N - gamma * I
+    dR <- gamma * I 
+    list(c(dS, dI, dR))
+  })
+}
+
+r1 <-  rk4(x0, times, SIR, params)
+plot(r1)
+
+I_values <- r1[, "I"]
+
+(I_max <- max(I_values))
+mu_t <- 0.85 * I_values
+
+h <- 100.5
+p1 <- h/(h + mu_t)
+data <- rnbinom(60, size = h, prob = p1)
+
+data_table <- data.frame(Time = times, I_Values = round(I_values),Y = data)
+
+plot(times,data, main = 'Observations', xlab = 'time')
+
+(data_max <- max(data))
+
+# Define the Likelihood
+likelihood <- function(data,theta) {
+  beta <- theta[1] # transmission rate
+  gamma <- theta[2] # recovery rate
+  phi <- theta[3] # dispersion parameter of the negative binomial model
+  S0 <- theta[4] # initial number of susceptible individuals
+  I0 <- theta[5] # initial number of infected individuals
+  
+  params2 <- c(beta, gamma)
+  
+  SIR_model <- function(t, x, params2) {
+    with(as.list(c(params2, x)), {
+      dS <- -beta * S * I / N 
+      dI <- beta * S * I / N - gamma * I
+      dR <- gamma * I 
+      list(c(dS, dI, dR))
+    })
+  }
+  
+  x_0 <- c(S = S0, I = I0, R = N - (S0 + I0))
+  out <-  rk4(x_0, times, SIR_model, params2)
+  
+  I_values <- out[, "I"]
+  
+  Loglikelihood <- 0
+  
+  # Calculate the log-likelihood
+  Loglikelihood <- sum(log(dnbinom(data, size = phi, prob = phi / (phi + 0.85*I_values))))
+  
+  return(Loglikelihood)
+}
+
+prior <- function(theta){
+  beta <- theta[1] # transmission rate
+  gamma <- theta[2] # recovery rate
+  phi <- theta[3] # dispersion parameter of the negative binomial model
+  S0 <- theta[4] # initial number of susceptible individuals
+  I0 <- theta[5] # initial number of infected individuals 
+  
+  log_prior_beta <- dlnorm(beta, log(0.28^2/sqrt(0.28^2 + 0.05^2)), sqrt(log(1 + (0.05^2/0.28^2))), log = TRUE)  
+  log_prior_gamma <- dlnorm(gamma, log(0.12^2/sqrt(0.12^2 + 0.025^2)), sqrt(log(1 + (0.025^2/0.12^2))), log = TRUE)
+  log_prior_phi <- dgamma(phi, shape = 20000, rate = 200, log = TRUE)
+  log_prior_S0 <- dnorm(S0, 994, 1, log = TRUE)
+  log_prior_I0 <- dnorm(I0, 6, 1, log = TRUE)
+  
+  return(log_prior_beta + log_prior_gamma + log_prior_phi + 
+           log_prior_S0  + log_prior_I0)
+}
+
+reference <- prior
+
+J <- 5
+K <- 1000
+d <- 5
+init <- function(){c(rlnorm(1,log(0.28^2/sqrt(0.28^2 + 0.05^2)),sqrt(log(1 + (0.05^2/0.28^2)))), 
+                     rlnorm(1,log(0.12^2/sqrt(0.12^2 + 0.025^2)),sqrt(log(1 + (0.025^2/0.12^2)))), 
+                     rgamma(1, 20000,rate = 200), 
+                     rnorm(1, 994, 1),
+                     rnorm(1, 6, 1))}
+
+b <- 0.95
+tuning_param <- list(eps = 0.5, eta = 0.9)
+#theta_cov <- 0.01^2 * diag(d) / d
+asmc_output <- asmc(K, theta_cov, tuning_param, init, data, likelihood, prior, reference)
+R1 <- length(asmc_output$particles)
+
+theta_1 <- t(sapply(asmc_output$particles[[1]], `[[`, "theta"))
+theta_2 <- t(sapply(asmc_output$particles[[2]], `[[`, "theta"))
+theta_R1 <- t(sapply(asmc_output$particles[[R1]], `[[`, "theta"))
+
+W_R1 <- asmc_output$W[[R1]]
+
+# post-run resampling
+resampled_indices <- sample(x = 1:K, size = K, replace = TRUE, 
+                            prob = W_R1)
+
+resampled_particles <- theta_R1[resampled_indices,]
+
+# Estimation of the parameters
+
+mean_theta <- colMeans(resampled_particles)
+
+# Initialize a matrix to store the credible intervals
+credible_intervals <- matrix(nrow = 2, ncol = ncol(resampled_particles))
+rownames(credible_intervals) <- c("Lower", "Upper")
+colnames(credible_intervals) <- colnames(resampled_particles)
+
+# Calculate 95% credible intervals for each parameter
+for(i in 1:ncol(resampled_particles)) {
+  credible_intervals[, i] <- quantile(resampled_particles[, i], probs = c(0.025, 0.975))
+}
+
+Parameters <- c("Beta", "Gamma", "Phi", "S0", "I0")
+(result <- data.frame(Parameters, mean_theta, t(credible_intervals)))
+
+
+par(mfrow=c(1,1))
+
+plot(unlist(asmc_output$alpha), xlab = 'Iteration', ylab = 'Annealing parameter')
+plot(unlist(asmc_output$ESS), xlab = 'Iteration', ylab = 'ESS')
+
+# For a single parameter
+#hist(resampled_particles[, 1], main="Histogram of Parameter 1", xlab="Parameter 1 Values")
+# Or for a density plot
+#plot(density(resampled_particles[, 1]), main="Density Plot of Parameter 1", xlab="Parameter 1 Values")
+
+
+# traceplots
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+library(grid)
+# Assuming 'resampled_particles' is a matrix with particles as rows and parameters as columns
+df <- as.data.frame(resampled_particles)
+colnames(df) <- c("Beta", "Gamma", "Phi", "S0", "I0")
+
+# Add an identifier for each particle
+df$ParticleID <- seq_len(nrow(df))
+
+# Melt the data frame into long format for ggplot
+df_long <- melt(df, id.vars = "ParticleID")
+
+# Create a named vector of colors for the parameters
+param_colors <- c("Beta" = "#E41A1C",  # Red
+                  "Gamma" = "#377EB8", # Blue
+                  "Phi" = "#4DAF4A",   # Green
+                  "S0" = "#984EA3",    # Purple
+                  "I0" = "#FF7F00")    # Orange
+
+# Plotting the trace plot for each parameter with assigned colors
+ggplot(df_long, aes(x = ParticleID, y = value, color = variable)) +
+  geom_line() +
+  scale_color_manual(values = param_colors) + # Assign colors to parameters
+  facet_wrap(~variable, scales = 'free_y') + # Separate plot for each parameter
+  labs(title = "Trace Plot of Resampled Particles for Each Parameter",
+       x = "Particle ID",
+       y = "Parameter Value") +
+  theme_minimal()
+
+# Histograms
+#df$ParticleID <- NULL
+
+# Melt the dataframe to long format
+#df_long1 <- melt(df, id.vars = "ParticleID", variable.name = "Parameter", value.name = "Value")
+df$ParticleID <- NULL
+#df_long1 <- melt(df, variable.name = "Parameter", value.name = "Value")
+
+# Define a vector with desired binwidths corresponding to each parameter
+binwidths <- c(Beta = 0.01, Gamma = 0.005, Phi = 0.5, S0 = 0.5, I0 = 0.5)
+
+# Create a named vector for the darker colors for density curves
+param_density_colors <- c("Beta" = "#A50F15", "Gamma" = "#08519C", "Phi" = "#238B45",
+                          "S0" = "#7A0177", "I0" = "#D94801")
+
+# Create a list to store ggplot objects
+plot_list <- list()
+
+for (param in names(binwidths)) {
+  data_sub <- data.frame(Value = df[[param]])
+  
+  p <- ggplot(data_sub, aes(x = Value)) +
+    geom_histogram(aes(y = after_stat(density)), binwidth = binwidths[param], fill = param_colors[param], color = "black", alpha = 0.5) +
+    geom_density(color = param_density_colors[param], linewidth = 1) + # Updated from size to linewidth
+    labs(title = paste("Histogram of", param),
+         x = param,
+         y = "Density") +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  plot_list[[param]] <- p
+}
+# Arrange the plots into a grid
+do.call(grid.arrange, c(plot_list, ncol = 3))
