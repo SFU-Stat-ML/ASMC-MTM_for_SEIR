@@ -24,7 +24,6 @@ function extract_auxiliary_info(asmc_output)
     #@show size(theta_mat) 
     weights = asmc_output.W[R1]
     cov_aux = weighted_covariance_matrix(theta_mat, weights)
-    @show size(cov_aux)
     z = agd(asmc_output, 1)[1]
     return z, cov_aux
 end
@@ -48,8 +47,6 @@ function cam(data, target_dis, theta_old, n, Mx, M, cov_local, asmc_output)
         ym = Matrix{Float64}(undef, M, d)
         um = Vector{Float64}(undef, M)
         T_fwd_vec = Vector{Float64}(undef, M)
-
-        @show cov_aux
 
         for m in 1 : M
             # Generate candidate ym
@@ -88,20 +85,21 @@ function cam(data, target_dis, theta_old, n, Mx, M, cov_local, asmc_output)
             if m == J
              xm_star[m, :] = theta_old
              T_rev_vec[m] = T_fwd
+             logp_star = target_dis(data, xm_star[m, :])
+             um_star[m] = sqrt(exp(logp_star))
             else
-            if m <= Mx
-            rev_sampler = TruncatedMVNSampler(MvNormal(theta_new, cov_local), lower)
-            else
-            rev_sampler = TruncatedMVNSampler(MvNormal(z, cov_aux), lower)
-            end
+                if m <= Mx
+                    rev_sampler = TruncatedMVNSampler(MvNormal(theta_new, cov_local), lower)
+                else
+                    rev_sampler = TruncatedMVNSampler(MvNormal(z, cov_aux), lower)
+                end
 
-            xm_star[m, :] = rand(rev_sampler)
+                xm_star[m, :] = rand(rev_sampler)
+                # reverse weights
+                logp_star = target_dis(data, xm_star[m, :])
+                um_star[m] = sqrt(exp(logp_star))
+                T_rev_vec[m] = tmvn_pdf(xm_star[m, :], rev_sampler)
             end
-            
-            # reverse weights
-            logp_star = target_dis(data, xm_star[m, :])
-            um_star[m] = sqrt(exp(logp_star))
-            T_rev_vec[m] = tmvn_pdf(xm_star[m, :], rev_sampler)
         end
 
         # x_star_J = xm_star[J, :]
