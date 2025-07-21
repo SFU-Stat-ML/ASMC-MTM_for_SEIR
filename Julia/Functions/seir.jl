@@ -1,3 +1,6 @@
+using Pkg
+Pkg.activate("/scratch/theniw8/")
+
 # SEIR model
 include("bisection.jl")
 include("additionalfns.jl")
@@ -5,9 +8,7 @@ include("mcmcmove.jl")
 include("tmvn.jl")
 include("asmc.jl")
 
-using DifferentialEquations, Distributions, StatsBase, Random
-
-Random.seed!(444)
+using DifferentialEquations, Distributions, StatsBase, Random, CSV, DataFrames
 
 # initial (state) values for the SEIR model
 N = 22e6
@@ -16,17 +17,17 @@ x0 = [N - i0, 0.4 * i0, 0.6 * i0, 0.0]
 
 t = 0:1:136
 
-params = (beta = 0.1447, delta = 1/3.2, gamma = 1/8.5, logphi = log(0.3415802))
+params = (beta = 0.1447, delta = 1/3.2, gamma = 1/8.5, logphi = log(10)) 
 
 # SEIR function
 function seir!(du, u, p, t)
-    S, E, I, R = u
+    S, E, I, R = max.(u, 0.0)
     β, δ, γ = p.beta, p.delta, p.gamma
 
-    du[1] = - β * u[1] * u[3] / N
-    du[2] = β * (u[1] * u[3] / N) - δ * u[2]
-    du[3] = δ * u[2] - γ * u[3]
-    du[4] = γ * u[3]
+    du[1] = - β * S * I / N
+    du[2] = β * S * I / N - δ * E
+    du[3] = δ * E - γ * I
+    du[4] = γ * I
 end
 
 # Data simulation
@@ -79,20 +80,6 @@ function sim_data(n, likelihood, ODEmodel, initial_states, times, params)
     )
 end
 
-# simulated data
-simulated_data = sim_data(
-    137,            # n
-    likelihood_NB_dfun,  # likelihood function/module
-    seir!,          # your ODE model function
-    x0,             # initial_states
-    t,          # times
-    params          # parameters
-)
-
-# Extract simulated values
-simulated_y = simulated_data.y
-simulated_t = simulated_data.t
-
 # Define the likelihood
 function likelihood(data, theta)
     beta, delta, gamma, phi = theta
@@ -126,10 +113,10 @@ end
 function prior(theta)
     beta, delta, gamma, phi = theta
 
-    log_prior_beta  = logpdf(LogNormal(log(0.1447), 0.25), beta)
-    log_prior_delta = logpdf(LogNormal(log(1/3.2), 0.2), delta)
-    log_prior_gamma = logpdf(LogNormal(log(1/8.5), 0.25), gamma)
-    log_prior_phi   = logpdf(Gamma(382.4282, 1/1000), phi)
+    log_prior_beta  = logpdf(LogNormal(log(0.1447), 0.1), beta)
+    log_prior_delta = logpdf(LogNormal(log(1/3.2), 0.07), delta)
+    log_prior_gamma = logpdf(LogNormal(log(1/8.5), 0.05), gamma)
+    log_prior_phi   = logpdf(Gamma(50, 0.2), phi)
     return log_prior_beta + log_prior_delta + log_prior_gamma + log_prior_phi
 end
 
@@ -137,27 +124,53 @@ end
 reference = prior
 
 # Number of particles and dimension
-K = 1000
+K = 545
 d = 4
 
 # Initial theta sampler (matching rlnorm and rgamma)
 init() = [
-    rand(LogNormal(log(0.1447), 0.25)),
-    rand(LogNormal(log(1 / 3.2), 0.2)),
-    rand(LogNormal(log(1 / 8.5), 0.25)),
-    rand(Gamma(382.4282, 1 / 1000))
+    rand(LogNormal(log(0.1447), 0.1)),
+    rand(LogNormal(log(1 / 3.2), 0.07)),
+    rand(LogNormal(log(1 / 8.5), 0.05)),
+    rand(Gamma(50, 0.2))
 ]
 
 # Tuning parameters
 b = 0.95
 tuning_param = Dict(:eps => 0.5, :eta => 0.95)
 
-data = simulated_y
+H = 50
 
-#thetacov = (0.1^2 / d) * I(d)
+Threads.@threads for i in 1:H
+    println("Running dataset $i")
+    Random.seed!(1000 + i)  # Reproducible results per dataset
 
-# Call your ASMC function (assumes it's defined in asmc.jl)
-asmc_output = asmc(K, d, b, tuning_param, init, data, likelihood, prior, reference);
+    simulated_data = sim_data(137, likelihood_NB_dfun, seir!, x0, t, params)
+    data = simulated_data.y
 
-# Run diagnostics and plotting
-include("analysis_asmc.jl")
+    asmc_output = asmc(K, d, b, tuning_param, init, data, likelihood, prior, reference)
+
+    R1 = length(asmc_output.particles)
+    theta_R1 = reduce(vcat, [reshape(p.theta, 1, :) for p in asmc_output.particles[R1]])
+
+    W_R1 = asmc_output.W[R1]
+    resampled_indices = sample(1:K, Weights(W_R1), K, replace=true)
+    resampled_particles = theta_R1[resampled_indices, :]
+
+    #println("resampled particle example:", resampled_particles)
+    
+    df_resampled = DataFrame(resampled_particles, :auto)
+    rename!(df_resampled, ["Beta", "Delta", "Gamma", "Phi"])
+    CSV.write("ASMC-LCB-rsp-$(i).csv", df_resampled)
+
+    # Save resampled particles (flattened)
+    #ASMC_AMTM_rsp = vec(resampled_particles)  # Flattened like R's unlist()
+    #CSV.write("ASMC-AMTM-SCB-rsp-$(i).csv", DataFrame(rsp = ASMC_AMTM_rsp))
+
+
+    # Save alpha, ESS, logZ (all unlisted vectors)
+    CSV.write("ASMC-LCB-alpha-$(i).csv", DataFrame(alpha_val = asmc_output.alpha))
+    CSV.write("ASMC-LCB-ESS-$(i).csv", DataFrame(ESS = asmc_output.ESS))
+    CSV.write("ASMC-LCB-logZ-$(i).csv", DataFrame(logZ = asmc_output.logZ))
+    CSV.write("ASMC-LCB-W-$(i).csv", DataFrame(W = reduce(vcat, asmc_output.W)))
+end
