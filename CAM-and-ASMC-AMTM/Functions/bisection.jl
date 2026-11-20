@@ -4,6 +4,7 @@
 
 function bisection(low, high, W, u, eta)
     mid = (low + high) / 2
+
     flow = rCESS(W, u, low, eta)
     fmid = rCESS(W, u, mid, eta)
     fhigh = rCESS(W, u, high, eta)

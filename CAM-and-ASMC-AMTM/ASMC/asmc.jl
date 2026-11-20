@@ -6,7 +6,7 @@ include("weightedcov.jl")
 using StatsBase, Statistics
 
 # ASMC Function
-function asmc(K, d, b, tuning_param, init, data, likelihood, prior, reference, J)
+function asmc(K, d, b, tuning_param, init, data, likelihood, prior, reference)
 
     # initialize storage lists
     alpha = Vector{Float64}()         
@@ -37,7 +37,7 @@ function asmc(K, d, b, tuning_param, init, data, likelihood, prior, reference, J
     push!(particles, [ (theta = init(), accept = false) for k in 1:K ])
 
     # initialize the weighted covariance matrix
-    weighted_cov = Matrix{Float64}(I, d, d)
+    weighted_cov = Matrix{Float64}(I(d))    
 
     # normalized weights
     push!(W, fill(1 / K, K))   
@@ -45,7 +45,7 @@ function asmc(K, d, b, tuning_param, init, data, likelihood, prior, reference, J
 
     # unnormalized weights
     w = fill(1.0, K)          
-    logw = fill(0.0, K) # debugged upto here
+    logw = fill(0.0, K) 
 
     # begin iterative process
     while alpha[r] < 1
@@ -61,12 +61,20 @@ function asmc(K, d, b, tuning_param, init, data, likelihood, prior, reference, J
         u = [likelihood(data, particles[r - 1][k].theta) for k in 1:K] # ✔
 
        if adaptive_alpha
-        alphaDiff = bisection(0.0, 1.0, W[r - 1], u, tuning_param[ :eta])
-        push!(alpha, alpha[r - 1] + alphaDiff)
-       else
-        alphaDiff = alpha[r] - alpha[r - 1] # ✔
-       end
-        
+            remaining = 1.0 - alpha[r - 1]
+            eta = tuning_param[:eta]
+
+            if rCESS(W[r - 1], u, remaining, eta) >= 0
+            alphaDiff = remaining
+            push!(alpha, 1.0)
+            else
+            alphaDiff = bisection(0.0, remaining, W[r - 1], u, eta)
+            push!(alpha, alpha[r - 1] + alphaDiff)
+            end
+        else
+            alphaDiff = alpha[r] - alpha[r - 1]
+        end
+
        print("annealing parameter: ", alpha[r], "\n")
 
        if alpha[r] > 1
@@ -74,16 +82,17 @@ function asmc(K, d, b, tuning_param, init, data, likelihood, prior, reference, J
         alphaDiff = 1 - alpha[r - 1]
        end
 
-       # updated mtmmove function
-       push!(particles, [
-        mtmmove(p, data, likelihood, prior, alpha, r, d, b, weighted_cov, J)
-        for p in particles[r - 1]
-        ]) # ✔
-
        # converting particles[r] list to a matrix
        theta_values = [p.theta for p in particles[r - 1]]
-       #theta_matrix = reduce(vcat, [theta' for theta in theta_values])
-       theta_matrix = Matrix(hcat(theta_values...)')  # always gives K × d matrix
+       theta_matrix = Matrix(hcat(theta_values...)')  
+       # calculate the weighted covariance matrix
+       weighted_cov = weighted_covariance_matrix(theta_matrix, W[r - 1])
+
+       # updated MCMCmove function
+       push!(particles, [
+        mcmcmove(p, data, likelihood, prior, alpha[r], r, d, b, weighted_cov)
+        for p in particles[r - 1]
+        ]) # ✔
     
        # compute ESS
        log_incremental_w = alphaDiff .* u
@@ -109,10 +118,6 @@ function asmc(K, d, b, tuning_param, init, data, likelihood, prior, reference, J
         w = fill(1.0, K)
         logw = fill(0.0, K)
        end
-    
-       # calculate the weighted covariance matrix
-       weighted_cov = weighted_covariance_matrix(theta_matrix, W[r - 1])
- 
     end
 
     return (
