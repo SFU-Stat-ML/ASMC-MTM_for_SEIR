@@ -20,4 +20,4 @@ While **Markov Chain Monte Carlo (MCMC)** and **Sequential Monte Carlo (SMC)** m
 |-----------|------------------------------|----------|
 | SIR/SEIR  | Adaptive ASMC                | R/ Julia |
 | SIR/SEIR  | ASMC + Adaptive MTM          | R/ Julia | 
-| SIR/SEIR  | CAM                          | R/ Julia |
+| SIR/SEIR  | CAM                          | Julia    |
