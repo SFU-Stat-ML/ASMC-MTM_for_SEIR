@@ -10,8 +10,8 @@ Mathematical and statistical epidemiology uses compartmental models, often expre
 
 While **Markov Chain Monte Carlo (MCMC)** and **Sequential Monte Carlo (SMC)** methods are standard, they can be computationally intensive. To address this, we:
 
-- Integrated a **Multiple-Try Metropolis (MTM)** kernel into the **Annealed SMC (ASMC)** framework (implemented in R and Julia).
-- Are applying the **Compound Auxiliary Metropolis (CAM)** method by Doig, R. (2025) in **Julia**, a more advanced and efficient sampling algorithm.
+- Integrated an adaptive **Multiple-Try Metropolis (MTM)** kernel into the **Annealed SMC (ASMC)** framework (implemented in R and Julia).
+- Applied the **Compound Auxiliary Metropolis (CAM)** method by Doig, R. (2025) in **Julia**, a more advanced and efficient sampling algorithm.
 
 
 ## Methods Implemented
