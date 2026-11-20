@@ -16,8 +16,8 @@ While **Markov Chain Monte Carlo (MCMC)** and **Sequential Monte Carlo (SMC)** m
 
 ## Methods Implemented
 
-| Model     | Method              | Language | Status      |
-|-----------|---------------------|----------|-------------|
-| SIR/SEIR  | Adaptive ASMC       | R/ Julia | ✅ Complete |
-| SIR/SEIR  | ASMC + MTM          | R/ Julia | ✅ Complete |
-| SEIR      | CAM                 | Julia    | ✅ Complete |
+| Model     | Method                       | Language |
+|-----------|------------------------------|----------|
+| SIR/SEIR  | Adaptive ASMC                | R/ Julia |
+| SIR/SEIR  | ASMC + Adaptive MTM          | R/ Julia | 
+| SIR/SEIR  | CAM                          | R/ Julia |
